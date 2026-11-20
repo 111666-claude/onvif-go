@@ -248,10 +248,10 @@ func TestEventSubscriptionExpires(t *testing.T) {
 		t.Fatalf("New() failed: %v", err)
 	}
 
-	sub := &eventSubscription{terminationTime: time.Now().Add(10 * time.Millisecond)}
+	sub := &eventSubscription{terminationTime: time.Now().Add(10 * time.Millisecond), wake: make(chan struct{})}
 	srv.subscriptionMu.Lock()
 	srv.subscription = sub
-	srv.scheduleExpiry(sub, 10*time.Millisecond)
+	srv.scheduleExpiryLocked(sub, 10*time.Millisecond)
 	srv.subscriptionMu.Unlock()
 
 	time.Sleep(150 * time.Millisecond)

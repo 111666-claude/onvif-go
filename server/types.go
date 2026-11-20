@@ -250,6 +250,24 @@ type Server struct {
 	subscription   *eventSubscription
 	subscriptionMu sync.RWMutex
 
+	// eventHooks carry test-only fault injection and clock controls for the
+	// event service. Production code leaves them zero. Guarded by
+	// subscriptionMu so tests can flip them while Run is pulling.
+	eventHooks EventTestHooks
+
+	// eventStats counts event-service operations since New. Guarded by
+	// subscriptionMu.
+	eventStats EventServiceStats
+
+	// longPollEvents enables blocking PullMessages: when true an idle pull
+	// waits up to its Timeout for a PostEvent notification instead of
+	// returning an empty batch immediately. The reliable event stream turns
+	// this on via EnableLongPolling so notifications are delivered as soon
+	// as they are produced; direct handler callers (and the existing
+	// handler tests) keep the immediate-return contract of the original
+	// minimal implementation. Guarded by subscriptionMu.
+	longPollEvents bool
+
 	// listener is set once Start has bound an address, and is what Addr
 	// reports. Guarded by listenerMu because Addr is normally called from a
 	// different goroutine than the one blocked in Start.
@@ -290,6 +308,94 @@ type eventSubscription struct {
 	// owning Server's subscription field once this subscription's
 	// termination time elapses. Mirrors PTZState.settleTimer.
 	expiryTimer *time.Timer
+
+	// queue holds notifications produced via PostEvent and not yet handed
+	// out by PullMessages. Guarded by the owning Server's subscriptionMu.
+	queue []queuedNotification
+
+	// lastDelivered remembers the most recent notification handed to a
+	// PullMessages caller, even after it left the queue, so PostEventRepeat
+	// can simulate a camera redelivering an already-consumed event after a
+	// reconnect. Guarded by the owning Server's subscriptionMu.
+	lastDelivered *queuedNotification
+
+	// wake is closed and replaced when a notification is queued, so a
+	// PullMessages long-poll can return as soon as one becomes available.
+	// Guarded by the owning Server's subscriptionMu.
+	wake chan struct{}
+
+	// pullWaiters counts in-flight PullMessages calls blocked on wake, used
+	// only by test hooks to wait without racing the long-poll. Guarded by
+	// the owning Server's subscriptionMu.
+	pullWaiters int
+}
+
+// queuedNotification is one notification waiting for a PullMessages call.
+type queuedNotification struct {
+	topic     string
+	producer  string
+	operation string
+	utcTime   time.Time
+	source    []SimpleItem
+	key       []SimpleItem
+	data      []SimpleItem
+	// redeliver marks a notification the server was asked to send again, so
+	// client-side de-duplication tests can prove a replay is suppressed. It
+	// changes nothing on the wire - the XML is byte-identical to the first
+	// delivery, as a real camera's redelivery would be.
+	redeliver bool
+}
+
+// SimpleItem is a name/value pair inside an ONVIF notification (tt:SimpleItem).
+type SimpleItem struct {
+	Name  string
+	Value string
+}
+
+// EventTestHooks carries fault-injection and clock controls used by the
+// reliable event-stream tests. The zero value disables every hook, so a
+// production-configured Server behaves exactly as before. Fields are intended
+// for test setup; they are safe to toggle while a stream is running because
+// each handler reads them under subscriptionMu.
+type EventTestHooks struct {
+	// RejectAuth makes every event-service SOAP handler fail authentication
+	// with the same Sender fault the soap handler emits for bad credentials.
+	RejectAuth bool
+
+	// RejectRenew makes HandleRenew fail with a Sender SOAP fault, simulating
+	// a camera that refuses to extend a subscription.
+	RejectRenew bool
+
+	// RejectPull makes HandlePullMessages fail with a Receiver SOAP fault,
+	// simulating a lost subscription or transient service failure that forces
+	// the client to re-subscribe.
+	RejectPull bool
+
+	// ClockOffset is added to time.Now() wherever the event service reports
+	// CurrentTime/TerminationTime/notification UtcTime, simulating a camera
+	// whose clock diverges from the client's.
+	ClockOffset time.Duration
+
+	// ExpireOnNextPull, when true, makes the next HandlePullMessages call
+	// behave as if the subscription had expired between calls (fault plus
+	// clearing the subscription), then resets itself. It models the silent
+	// expiry a real camera performs when a renewal deadline is missed.
+	ExpireOnNextPull bool
+}
+
+// EventServiceStats counts event-service operations, primarily so tests can
+// assert on renewal, unsubscribe and reconnection behavior without timing
+// assumptions.
+type EventServiceStats struct {
+	SubscriptionsCreated int
+	SubscriptionsExpired int
+	Renews               int
+	RenewsRejected       int
+	Pulls                int
+	PullsRejected        int
+	Unsubscribes         int
+	NotificationsQueued  int
+	NotificationsSent    int
 }
 
 // ImagingState represents the current imaging settings state.

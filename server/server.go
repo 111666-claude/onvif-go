@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"strconv"
 	"time"
 
+	originsoap "github.com/0x524a/onvif-go/internal/soap"
 	"github.com/0x524a/onvif-go/server/soap"
 )
 
@@ -379,7 +381,52 @@ func (s *Server) registerEventService(mux *http.ServeMux) {
 	handler.RegisterHandler("Renew", s.HandleRenew)
 	handler.RegisterHandler("Unsubscribe", s.HandleUnsubscribe)
 
-	mux.Handle(s.config.BasePath+"/events_service", handler)
+	// The auth-rejection test hook lives below the SOAP layer, so wrap the
+	// handler rather than teach soap.Handler about test hooks.
+	wrapped := &eventAuthRejectWrapper{server: s, Handler: handler}
+	mux.Handle(s.config.BasePath+"/events_service", wrapped)
+}
+
+// eventAuthRejectWrapper answers every event-service request with the same
+// Sender authentication fault soap.Handler emits for bad credentials when
+// EventTestHooks.RejectAuth is enabled. It is the test-only path for
+// simulating expired/rotated camera credentials against the reliable event
+// stream.
+type eventAuthRejectWrapper struct {
+	server *Server
+	*soap.Handler
+}
+
+// ServeHTTP implements http.Handler.
+func (w *eventAuthRejectWrapper) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+	w.server.subscriptionMu.RLock()
+	reject := w.server.eventHooks.RejectAuth
+	w.server.subscriptionMu.RUnlock()
+
+	if reject {
+		fault := &originsoap.Fault{
+			Code:   "Sender",
+			Reason: "Authentication failed",
+			Detail: "Invalid username or password",
+		}
+		envelope := &originsoap.Envelope{
+			Body: originsoap.Body{Fault: fault},
+		}
+		body, err := xml.MarshalIndent(envelope, "", "  ")
+		if err != nil {
+			http.Error(rw, "Internal server error", http.StatusInternalServerError)
+
+			return
+		}
+		rw.Header().Set("Content-Type", "application/soap+xml; charset=utf-8")
+		rw.WriteHeader(http.StatusBadRequest)
+		//nolint:errcheck // fault write cannot be retried
+		_, _ = rw.Write(append([]byte(xml.Header), body...))
+
+		return
+	}
+
+	w.Handler.ServeHTTP(rw, req)
 }
 
 // handleSnapshot handles HTTP snapshot requests.

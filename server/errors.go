@@ -32,4 +32,19 @@ var (
 	// ErrInvalidDuration is returned when an ISO-8601 duration string cannot
 	// be parsed.
 	ErrInvalidDuration = errors.New("invalid duration")
+
+	// ErrEventQueueFull is returned by PostEvent when the subscription's
+	// notification queue has reached its bound and the oldest entry has been
+	// evicted to make room. The new event is still enqueued; this is advisory.
+	ErrEventQueueFull = errors.New("event subscription queue full")
+
+	// ErrFaultInjected is the error behind fault-injection test hooks, so a
+	// test can distinguish an engineered fault from a genuine handler error
+	// with errors.Is.
+	ErrFaultInjected = errors.New("fault injected by test hook")
+
+	// ErrInvalidParameter is returned when a caller-supplied value is
+	// invalid. Aliased to the client package's sentinel like the other
+	// cross-package errors above.
+	ErrInvalidParameter = onvif.ErrInvalidParameter
 )

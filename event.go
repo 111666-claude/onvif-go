@@ -274,16 +274,32 @@ func (c *Client) PullMessages(
 	timeout time.Duration,
 	messageLimit int,
 ) ([]NotificationMessage, error) {
+	messages, _, _, err := c.pullMessagesDetailed(ctx, subscriptionReference, timeout, messageLimit)
+
+	return messages, err
+}
+
+// pullMessagesDetailed is PullMessages plus the device-reported CurrentTime
+// and TerminationTime from the response. The reliable EventStream needs both:
+// CurrentTime drives clock-skew estimation and TerminationTime drives renewal
+// scheduling. Keeping one wire implementation means the public method and the
+// stream can never drift apart in what they parse.
+func (c *Client) pullMessagesDetailed(
+	ctx context.Context,
+	subscriptionReference string,
+	timeout time.Duration,
+	messageLimit int,
+) (messages []NotificationMessage, currentTime time.Time, terminationTime time.Time, err error) {
 	if subscriptionReference == "" {
-		return nil, ErrInvalidSubscriptionReference
+		return nil, time.Time{}, time.Time{}, ErrInvalidSubscriptionReference
 	}
 
 	if timeout <= 0 {
-		return nil, ErrInvalidTimeout
+		return nil, time.Time{}, time.Time{}, ErrInvalidTimeout
 	}
 
 	if messageLimit <= 0 {
-		return nil, ErrInvalidMessageLimit
+		return nil, time.Time{}, time.Time{}, ErrInvalidMessageLimit
 	}
 
 	type PullMessages struct {
@@ -341,11 +357,23 @@ func (c *Client) PullMessages(
 	username, password := c.GetCredentials()
 	soapClient := soap.NewClient(c.httpClient, username, password)
 
-	if err := soapClient.Call(ctx, subscriptionReference, "", req, &resp); err != nil {
-		return nil, fmt.Errorf("PullMessages failed: %w", err)
+	if callErr := soapClient.Call(ctx, subscriptionReference, "", req, &resp); callErr != nil {
+		return nil, time.Time{}, time.Time{}, fmt.Errorf("PullMessages failed: %w", callErr)
 	}
 
-	messages := make([]NotificationMessage, len(resp.NotificationMessages))
+	if resp.CurrentTime != "" {
+		if t, parseErr := time.Parse(time.RFC3339, resp.CurrentTime); parseErr == nil {
+			currentTime = t
+		}
+	}
+
+	if resp.TerminationTime != "" {
+		if t, parseErr := time.Parse(time.RFC3339, resp.TerminationTime); parseErr == nil {
+			terminationTime = t
+		}
+	}
+
+	messages = make([]NotificationMessage, len(resp.NotificationMessages))
 	for i := range resp.NotificationMessages {
 		nm := &resp.NotificationMessages[i]
 		msg := NotificationMessage{
@@ -356,7 +384,7 @@ func (c *Client) PullMessages(
 		msg.Message.PropertyOperation = nm.Message.Inner.PropertyOperation
 
 		if nm.Message.Inner.UtcTime != "" {
-			if t, err := time.Parse(time.RFC3339, nm.Message.Inner.UtcTime); err == nil {
+			if t, parseErr := time.Parse(time.RFC3339, nm.Message.Inner.UtcTime); parseErr == nil {
 				msg.Message.UtcTime = t
 			}
 		}
@@ -382,7 +410,7 @@ func (c *Client) PullMessages(
 		messages[i] = msg
 	}
 
-	return messages, nil
+	return messages, currentTime, terminationTime, nil
 }
 
 // Seek seeks to a specific position in the event stream.

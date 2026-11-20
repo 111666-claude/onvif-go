@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Reliable event stream: `Client.NewEventStream` / `EventStream.Run` maintains
+  a self-renewing ONVIF pull-point subscription and emits normalized,
+  de-duplicated `StreamEvent` values (stable content-based ID, gap-free
+  sequence, topic, device and local timestamps, producer, source/key/data
+  items). A deadline timer renews the subscription before it expires, transient
+  pull/renew failures trigger backoff-based re-subscription while the replay
+  cache survives, auth rejections terminate with `ErrSubscriptionLost`, a full
+  output buffer drops the newest event (`OnEventDropped`, `ErrEventDropped`)
+  instead of stalling the pull loop, and `Close` best-effort unsubscribes and
+  releases the goroutine. See `docs/EVENT_STREAM.md`.
+- `Client.PullMessages` now shares its wire implementation with an internal
+  variant that also returns the device-reported `CurrentTime` and
+  `TerminationTime`; the public method's signature and behavior are unchanged.
+- Virtual camera event producer: `Server.PostEvent`, `PostEventRepeat`,
+  `EnableLongPolling`, `SetEventTestHooks`, `WaitForPullWaiters` and
+  `EventStats`. `PullMessages` supports real notification delivery with
+  long-polling, bounded buffering and injectable faults (auth/renew/pull
+  rejection, silent expiry, clock offset) for reliable-stream testing.
+
 ### Fixed
 
 - `PTZConfigurationOptions.PTZTimeout` is nil unless both bounds parse, are not negative and are ordered; a missing, garbage or inverted bound no longer becomes zero. `parseXSDuration` refuses a duration that overflows instead of wrapping negative.
